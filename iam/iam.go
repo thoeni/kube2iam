@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"log"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -72,8 +74,72 @@ func sessionName(roleARN, remoteIP string) string {
 	return fmt.Sprintf("%.[2]*[1]s", name, maxSessNameLength)
 }
 
+type Prefetcher struct {
+	RoleARNTickers map[string]*RoleARNTicker
+	RoleARNs       chan RoleARN
+}
+
+type RoleARN struct {
+	arn      string
+	remoteIP string
+}
+
+type RoleARNTicker struct {
+	roleArn RoleARN
+	ticker  *time.Ticker
+	iam     *Client
+}
+
+func (p *Prefetcher) Start(iam *Client) {
+	go func() {
+		for newARNRole := range p.RoleARNs {
+			log.Printf("Received request for ARNRole: %s - RemoteIP: %s", newARNRole.arn, newARNRole.remoteIP)
+			if _, exists := p.RoleARNTickers[newARNRole.arn]; !exists {
+				log.Printf("Creating new ticker for ARNRole: %s", newARNRole.arn)
+				ticker := time.NewTicker(ttl - 1*time.Minute)
+				(*p).RoleARNTickers[newARNRole.arn] = &RoleARNTicker{RoleARN{newARNRole.arn, newARNRole.remoteIP}, ticker, iam}
+
+				go ((*p).RoleARNTickers[newARNRole.arn]).prefetch()
+			} else {
+				log.Printf("Ticker already exists for ARNRole: %s. Updating remoteIP: [%s] => [%s]", newARNRole.arn, (*(*p).RoleARNTickers[newARNRole.arn]).roleArn.remoteIP, newARNRole.remoteIP)
+				(*(*p).RoleARNTickers[newARNRole.arn]).roleArn.remoteIP = newARNRole.remoteIP
+			}
+		}
+	}()
+}
+
+func (p *Prefetcher) Stop() {
+	log.Printf("Called Prefetcher Stop")
+	close(p.RoleARNs)
+	log.Printf("Closed Prefetcher channel")
+	for _, t := range p.RoleARNTickers {
+		log.Printf("Stopping ticker for ARNRole: %s", t.roleArn.arn)
+		t.ticker.Stop()
+	}
+	p.RoleARNTickers = make(map[string]*RoleARNTicker)
+	p.RoleARNs = make(chan RoleARN)
+	log.Printf("Prefercher stopped")
+}
+
+func (t RoleARNTicker) prefetch() {
+	log.Printf("Starting prefetch routine for ARNRole: %s", t.roleArn.arn)
+	for range t.ticker.C {
+		log.Printf("Assuming role for ARNRole: %s, remoteIP: %s", t.roleArn.arn, t.roleArn.remoteIP)
+		t.iam.AssumeRole(t.roleArn.arn, t.roleArn.remoteIP)
+	}
+}
+
+var Pref *Prefetcher
+
 // AssumeRole returns an IAM role Credentials using AWS STS.
 func (iam *Client) AssumeRole(roleARN, remoteIP string) (*Credentials, error) {
+	if Pref != nil {
+		log.Printf("AssumeRole endpoint called for ARNRole: %s. Sending notification to Prefetcher.", roleARN)
+		(*Pref).RoleARNs <- RoleARN{
+			arn:      roleARN,
+			remoteIP: remoteIP,
+		}
+	}
 	item, err := cache.Fetch(roleARN, ttl, func() (interface{}, error) {
 		sess, err := session.NewSession()
 		if err != nil {

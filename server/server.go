@@ -54,6 +54,7 @@ type Server struct {
 	Debug                   bool
 	Insecure                bool
 	NamespaceRestriction    bool
+	PrefetchCredentials     bool
 	Verbose                 bool
 	Version                 bool
 	iam                     *iam.Client
@@ -291,6 +292,15 @@ func (s *Server) Run(host, token string, insecure bool) error {
 	r.Handle("/{version}/meta-data/iam/security-credentials/{role:.*}", appHandler(s.roleHandler))
 	r.Handle("/healthz", appHandler(s.healthHandler))
 	r.Handle("/{path:.*}", appHandler(s.reverseProxyHandler))
+
+	if s.PrefetchCredentials {
+		iam.Pref = &iam.Prefetcher{
+			RoleARNTickers: make(map[string]*iam.RoleARNTicker),
+			RoleARNs:       make(chan iam.RoleARN),
+		}
+		defer iam.Pref.Stop()
+		iam.Pref.Start(s.iam)
+	}
 
 	log.Infof("Listening on port %s", s.AppPort)
 	if err := http.ListenAndServe(":"+s.AppPort, r); err != nil {
