@@ -96,7 +96,7 @@ func (p *Prefetcher) Start(iam *Client) {
 			log.Printf("Received request for ARNRole: %s - RemoteIP: %s", newARNRole.arn, newARNRole.remoteIP)
 			if _, exists := p.RoleARNTickers[newARNRole.arn]; !exists {
 				log.Printf("Creating new ticker for ARNRole: %s", newARNRole.arn)
-				ticker := time.NewTicker(ttl - 1*time.Minute)
+				ticker := time.NewTicker(ttl + 1*time.Minute)
 				(*p).RoleARNTickers[newARNRole.arn] = &RoleARNTicker{RoleARN{newARNRole.arn, newARNRole.remoteIP}, ticker, iam}
 
 				go ((*p).RoleARNTickers[newARNRole.arn]).prefetch()
