@@ -96,7 +96,7 @@ func (p *Prefetcher) Start(iam *Client) {
 			log.Printf("Received request for ARNRole: %s - RemoteIP: %s", newARNRole.arn, newARNRole.remoteIP)
 			if _, exists := p.RoleARNTickers[newARNRole.arn]; !exists {
 				log.Printf("Creating new ticker for ARNRole: %s", newARNRole.arn)
-				ticker := time.NewTicker(ttl + 1*time.Minute)
+				ticker := time.NewTicker(ttl - 1*time.Minute)
 				(*p).RoleARNTickers[newARNRole.arn] = &RoleARNTicker{RoleARN{newARNRole.arn, newARNRole.remoteIP}, ticker, iam}
 
 				go ((*p).RoleARNTickers[newARNRole.arn]).prefetch()
@@ -125,13 +125,20 @@ func (t RoleARNTicker) prefetch() {
 	log.Printf("Starting prefetch routine for ARNRole: %s", t.roleArn.arn)
 	for range t.ticker.C {
 		log.Printf("Assuming role for ARNRole: %s, remoteIP: %s", t.roleArn.arn, t.roleArn.remoteIP)
-		t.iam.AssumeRole(t.roleArn.arn, t.roleArn.remoteIP)
+		start := time.Now()
+		creds, err := t.iam.FetchNewCreds(t.roleArn.arn, t.roleArn.remoteIP)
+		elapsed := time.Since(start).Nanoseconds() / int64(time.Millisecond)
+		log.Printf("AssumeRole call from prefetcher took %v ms", elapsed)
+		if err != nil {
+			log.Printf("Error while fetching credentials for role %v. Error was: %v", t.roleArn.arn, err)
+		}
+		cache.Set(t.roleArn.arn, creds, ttl)
 	}
 }
 
 var Pref *Prefetcher
 
-// AssumeRole returns an IAM role Credentials using AWS STS.
+// AssumeRole returns an IAM role Credentials from cache, or using AWS STS if cache miss
 func (iam *Client) AssumeRole(roleARN, remoteIP string) (*Credentials, error) {
 	if Pref != nil {
 		log.Printf("AssumeRole endpoint called for ARNRole: %s. Sending notification to Prefetcher.", roleARN)
@@ -140,35 +147,38 @@ func (iam *Client) AssumeRole(roleARN, remoteIP string) (*Credentials, error) {
 			remoteIP: remoteIP,
 		}
 	}
-	item, err := cache.Fetch(roleARN, ttl, func() (interface{}, error) {
-		sess, err := session.NewSession()
-		if err != nil {
-			return nil, err
-		}
-		svc := sts.New(sess, &aws.Config{LogLevel: aws.LogLevel(2)})
-		resp, err := svc.AssumeRole(&sts.AssumeRoleInput{
-			DurationSeconds: aws.Int64(int64(ttl.Seconds() * 2)),
-			RoleArn:         aws.String(roleARN),
-			RoleSessionName: aws.String(sessionName(roleARN, remoteIP)),
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		return &Credentials{
-			AccessKeyID:     *resp.Credentials.AccessKeyId,
-			Code:            "Success",
-			Expiration:      resp.Credentials.Expiration.Format("2006-01-02T15:04:05Z"),
-			LastUpdated:     time.Now().Format("2006-01-02T15:04:05Z"),
-			SecretAccessKey: *resp.Credentials.SecretAccessKey,
-			Token:           *resp.Credentials.SessionToken,
-			Type:            "AWS-HMAC",
-		}, nil
-	})
+	item, err := cache.Fetch(roleARN, ttl, func()(interface{}, error){ return iam.FetchNewCreds(roleARN, remoteIP) })
 	if err != nil {
 		return nil, err
 	}
 	return item.Value().(*Credentials), nil
+}
+
+// FetchNewCreds returns an IAM role Credentials using AWS STS.
+func (iam *Client) FetchNewCreds(roleARN, remoteIP string) (interface{}, error) {
+	sess, err := session.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	svc := sts.New(sess, &aws.Config{LogLevel: aws.LogLevel(2)})
+	resp, err := svc.AssumeRole(&sts.AssumeRoleInput{
+		DurationSeconds: aws.Int64(int64(ttl.Seconds() * 2)),
+		RoleArn:         aws.String(roleARN),
+		RoleSessionName: aws.String(sessionName(roleARN, remoteIP)),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &Credentials{
+		AccessKeyID:     *resp.Credentials.AccessKeyId,
+		Code:            "Success",
+		Expiration:      resp.Credentials.Expiration.Format("2006-01-02T15:04:05Z"),
+		LastUpdated:     time.Now().Format("2006-01-02T15:04:05Z"),
+		SecretAccessKey: *resp.Credentials.SecretAccessKey,
+		Token:           *resp.Credentials.SessionToken,
+		Type:            "AWS-HMAC",
+	}, nil
 }
 
 // NewClient returns a new IAM client.

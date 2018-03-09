@@ -234,7 +234,11 @@ func (s *Server) roleHandler(logger *log.Entry, w http.ResponseWriter, r *http.R
 		return
 	}
 
+	start := time.Now()
 	credentials, err := s.iam.AssumeRole(wantedRoleARN, remoteIP)
+	elapsed := time.Since(start).Nanoseconds() / int64(time.Millisecond)
+	logger.Infof("AssumeRole call from API took %v ms", elapsed)
+
 	if err != nil {
 		roleLogger.Errorf("Error assuming role %+v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
